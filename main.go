@@ -7,7 +7,7 @@ import (
 	"os/exec"
 	"time"
 
-	"github.com/alterminal/alterpty/vt100"
+	"github.com/chenyunda218/alterminal/vt100"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )

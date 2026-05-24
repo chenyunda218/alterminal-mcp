@@ -1,4 +1,4 @@
-module github.com/alterminal/alterpty
+module github.com/chenyunda218/alterminal
 
 go 1.26.1
 
