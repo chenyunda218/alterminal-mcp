@@ -38,12 +38,12 @@ func ServeStdio(vt *vt100.VT100, options func(option toolsOption) toolsOption) {
 	)
 
 	s.AddTool(screenshotTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		format, _ := request.RequireString("format")
+		format := request.GetString("format", "text")
 		switch format {
-		case "text":
-			return mcp.NewToolResultText(vt.String()), nil
+		case "html":
+			return mcp.NewToolResultText(vt.ToHTML()), nil
 		}
-		return mcp.NewToolResultText(vt.ToHTML()), nil
+		return mcp.NewToolResultText(vt.String()), nil
 	})
 
 	getSizeTool := mcp.NewTool(option.prefix+"get_window_size",
