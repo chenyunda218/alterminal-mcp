@@ -2,14 +2,28 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"net/http"
+	"os"
 	"os/exec"
 
 	"github.com/chenyunda218/alterminal-mcp/tools"
+	"github.com/chenyunda218/alterminal-mcp/tunnel"
 	"github.com/chenyunda218/alterminal-mcp/vt100"
+	"github.com/joho/godotenv"
 )
 
 func main() {
+	err := godotenv.Load()
+	if err != nil {
+		log.Fatal("Error loading .env file")
+	}
+
+	baseUrl := os.Getenv("BASE_URL")
+	mcpId := os.Getenv("MCP_ID")
+	secretKey := os.Getenv("MCP_SECRET_KEY")
+	tunnel := tunnel.New(baseUrl, mcpId, secretKey)
+	tunnel.Connect()
 	mux := http.NewServeMux()
 	cmd := exec.Command("bash", "--norc")
 	rows, cols := uint16(24), uint16(80)
