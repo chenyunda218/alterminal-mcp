@@ -1,0 +1,505 @@
+openapi: 3.0.3
+info:
+  title: Alterminal Actor API
+  description: |
+    Actor 執行階段 API，供外部客戶端與執行中的 Actor 程序互動。
+
+    ## 認證
+
+    所有端點皆需在 HTTP Header 帶入 `secret-key`（建立 Actor 時由系統產生，可於 Web UI 的 Actor 詳情頁取得）。
+
+    ## 典型流程
+
+    1. 以 `GET /api/actors/{actor_id}/messages` 讀取 Actor 對話訊息歷史。
+    2. 以 `PUT /api/actors/{actor_id}/tools` 更新 Actor 的工具定義（寫入資料庫；若程序已在執行則同步至記憶體）。
+    3. （可選）以 `GET /api/actors/{actor_id}/sse` 建立 SSE 連線，啟動 Actor 程序並保持長連線。
+
+    工具欄位格式依 Actor 綁定的 Intelligent `api_type` 解析（`openai` 或 `anthropic`）。
+  version: 1.0.0
+  contact:
+    name: Alterminal
+
+servers:
+  - url: http://localhost:4000
+    description: 本機開發（`mix phx.server` 預設埠）
+  - url: https://{host}
+    description: 生產環境
+    variables:
+      host:
+        default: example.com
+        description: 部署主機名（`PHX_HOST`）
+
+tags:
+  - name: Actors
+    description: Actor 執行階段連線與工具管理
+
+security:
+  - SecretKeyAuth: []
+
+paths:
+  /api/actors/{actor_id}/sse:
+    get:
+      operationId: connectActorSse
+      tags: [Actors]
+      summary: 建立 Actor SSE 連線
+      description: |
+        以 Server-Sent Events 與 Actor 保持長連線。驗證通過後會啟動（或查找）Actor 程序，
+        並每 5 秒推送一則 `data: hello` 事件。客戶端斷線時會停止對應的 Actor 程序。
+
+        **注意：** 若該 Actor 已由其他 SSE 連線啟動，回傳 `503`（Actor 已經啟動）。
+      parameters:
+        - $ref: "#/components/parameters/ActorId"
+      responses:
+        "200":
+          description: SSE 串流已建立
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  符合 SSE 格式的文字串流。目前僅推送固定 payload `hello`。
+              examples:
+                helloEvent:
+                  summary: 週期性 hello 事件
+                  value: |
+                    data: hello
+
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/ActorNotFound"
+        "503":
+          description: Actor 無法啟動或已被其他連線佔用
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                alreadyStarted:
+                  summary: Actor 已經啟動
+                  value:
+                    success: false
+                    error:
+                      message: Actor 已經啟動
+                connectionFailed:
+                  summary: Actor 連線失敗
+                  value:
+                    success: false
+                    error:
+                      message: Actor 連線失敗
+
+  /api/actors/{actor_id}/messages:
+    get:
+      operationId: listActorMessages
+      tags: [Actors]
+      summary: 取得 Actor 對話訊息
+      description: |
+        回傳指定 Actor 的對話訊息列表，依 `position` 升序排列。
+
+        若 Actor 尚無對話紀錄，回傳空陣列。訊息內容以 JSON map 儲存，常見格式為純文字
+        `{"type": "text", "value": "..."}` 或多段內容 `{"type": "parts", "value": [...]}`。
+      parameters:
+        - $ref: "#/components/parameters/ActorId"
+      responses:
+        "200":
+          description: 訊息列表
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessagesResponse"
+              examples:
+                withMessages:
+                  summary: 含使用者訊息
+                  value:
+                    messages:
+                      - id: b192fe6a-45e2-44a4-8553-0e065c372074
+                        role: user
+                        content:
+                          type: text
+                          value: Hello
+                        name: null
+                        tool_call_id: null
+                        refusal: null
+                        position: 0
+                        inserted_at: "2026-05-31T12:10:55Z"
+                        updated_at: "2026-05-31T12:10:55Z"
+                empty:
+                  summary: 無對話訊息
+                  value:
+                    messages: []
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/ActorNotFound"
+
+  /api/actors/{actor_id}/tools:
+    put:
+      operationId: updateActorTools
+      tags: [Actors]
+      summary: 更新 Actor 的工具定義
+      description: |
+        將請求內的工具定義寫入 Actor 資料庫紀錄（完全取代既有工具，非 merge）。
+        若 Actor 程序已在執行，會同步更新程序記憶體中的工具表。
+
+        請求 body 可為：
+        - 頂層工具 map：工具名稱為 key，定義為 value
+        - 或包在 `tools` 欄位內的 map
+
+        每個工具定義依 Intelligent `api_type` 解析：
+        - **openai**：`name`、`description`、`parameters`（JSON Schema）、可選 `strict`
+        - **anthropic**：`name`、`description`、`input_schema`（JSON Schema）
+      parameters:
+        - $ref: "#/components/parameters/ActorId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: "#/components/schemas/ToolsUpdateBody"
+                - $ref: "#/components/schemas/ToolsUpdateWrapped"
+            examples:
+              flatOpenAi:
+                summary: OpenAI 風格（頂層 map）
+                value:
+                  get_weather:
+                    name: get_weather
+                    description: Get current weather for a city
+                    parameters:
+                      type: object
+                      properties:
+                        city:
+                          type: string
+                          description: City name
+                      required: [city]
+              wrappedOpenAi:
+                summary: OpenAI 風格（包在 tools 內）
+                value:
+                  tools:
+                    get_weather:
+                      name: get_weather
+                      description: Get current weather for a city
+                      parameters:
+                        type: object
+                        properties:
+                          city:
+                            type: string
+                        required: [city]
+              anthropic:
+                summary: Anthropic 風格（需 Actor 綁定 anthropic Intelligent）
+                value:
+                  get_weather:
+                    name: get_weather
+                    description: Get current weather for a city
+                    input_schema:
+                      type: object
+                      properties:
+                        city:
+                          type: string
+                      required: [city]
+      responses:
+        "200":
+          description: 工具已更新
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+              example:
+                success: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/ActorNotFound"
+        "422":
+          description: 工具格式無效
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                success: false
+                error:
+                  message: Tools 格式無效
+
+components:
+  securitySchemes:
+    SecretKeyAuth:
+      type: apiKey
+      in: header
+      name: secret-key
+      description: Actor 專用密鑰（建立時自動產生）
+
+  parameters:
+    ActorId:
+      name: actor_id
+      in: path
+      required: true
+      description: Actor UUID
+      schema:
+        type: string
+        format: uuid
+      example: 550e8400-e29b-41d4-a716-446655440000
+
+  responses:
+    Unauthorized:
+      description: Secret Key 缺失或無效
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            success: false
+            error:
+              message: Secret Key 無效
+    ActorNotFound:
+      description: 資料庫中無此 Actor
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            success: false
+            error:
+              message: Actor 不存在
+
+  schemas:
+    MessagesResponse:
+      type: object
+      required: [messages]
+      properties:
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConversationMessage"
+      additionalProperties: false
+
+    ConversationMessage:
+      type: object
+      required: [id, role, position, inserted_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: 訊息 UUID
+        role:
+          type: string
+          enum: [system, user, assistant, tool, developer]
+          description: 訊息角色
+        content:
+          oneOf:
+            - $ref: "#/components/schemas/TextContent"
+            - $ref: "#/components/schemas/PartsContent"
+          nullable: true
+          description: 訊息內容（JSON map）
+        name:
+          type: string
+          nullable: true
+          description: 工具或函式名稱（role 為 tool 時常見）
+        tool_call_id:
+          type: string
+          nullable: true
+          description: 關聯的工具呼叫 ID
+        refusal:
+          type: string
+          nullable: true
+          description: 模型拒絕回應說明
+        position:
+          type: integer
+          minimum: 0
+          description: 對話中的順序（由 0 起算）
+        inserted_at:
+          type: string
+          format: date-time
+          description: 建立時間（UTC）
+        updated_at:
+          type: string
+          format: date-time
+          description: 更新時間（UTC）
+      additionalProperties: false
+
+    TextContent:
+      type: object
+      required: [type, value]
+      properties:
+        type:
+          type: string
+          enum: [text]
+        value:
+          type: string
+      additionalProperties: false
+
+    PartsContent:
+      type: object
+      required: [type, value]
+      properties:
+        type:
+          type: string
+          enum: [parts]
+        value:
+          type: array
+          items:
+            $ref: "#/components/schemas/ContentPart"
+          description: 多段內容（文字、圖片、工具呼叫等）
+      additionalProperties: false
+
+    ContentPart:
+      description: |
+        單一內容片段。常見 `type` 值：`text`、`image`、`tool_call`、`tool_result`、`thinking` 等。
+        實際欄位依類型而異。
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          description: 內容片段類型
+        text:
+          type: string
+          description: 文字內容（type 為 text 時）
+        thinking:
+          type: string
+          description: 推理內容（type 為 thinking 時）
+        signature:
+          type: string
+        source:
+          type: object
+          description: 圖片來源（type 為 image 時）
+        id:
+          type: string
+          description: 工具呼叫 ID（type 為 tool_call 時）
+        name:
+          type: string
+          description: 工具名稱
+        arguments:
+          oneOf:
+            - type: object
+            - type: string
+          description: 工具呼叫參數
+        tool_call_id:
+          type: string
+          description: 關聯的工具呼叫 ID（type 為 tool_result 時）
+        content:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                $ref: "#/components/schemas/ContentPart"
+          description: 巢狀內容（type 為 tool_result 時）
+        is_error:
+          type: boolean
+          description: 工具執行是否失敗
+        extra:
+          type: object
+          description: 供應商特定欄位
+      additionalProperties: true
+
+    SuccessResponse:
+      type: object
+      required: [success]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+      additionalProperties: false
+
+    ErrorResponse:
+      type: object
+      required: [success, error]
+      properties:
+        success:
+          type: boolean
+          enum: [false]
+        error:
+          type: object
+          required: [message]
+          properties:
+            message:
+              type: string
+              description: 人類可讀的錯誤訊息（繁體中文）
+          additionalProperties: false
+      additionalProperties: false
+
+    ToolsUpdateBody:
+      type: object
+      description: 工具名稱 → 工具定義（頂層 map，不含 `tools` 包裝）
+      additionalProperties:
+        $ref: "#/components/schemas/ToolDefinition"
+      minProperties: 1
+      example:
+        get_weather:
+          name: get_weather
+          description: Get weather
+          parameters:
+            type: object
+            properties: {}
+
+    ToolsUpdateWrapped:
+      type: object
+      required: [tools]
+      properties:
+        tools:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/ToolDefinition"
+          minProperties: 1
+
+    ToolDefinition:
+      description: |
+        單一工具定義。實際解析欄位依 Actor 的 Intelligent `api_type` 決定。
+        OpenAI 使用 `parameters`；Anthropic 使用 `input_schema`。
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          description: 工具名稱（須與 map key 一致）
+        description:
+          type: string
+          nullable: true
+          description: 工具說明，供模型選擇是否呼叫
+        parameters:
+          $ref: "#/components/schemas/JsonSchema"
+          description: OpenAI function `parameters`（api_type 為 openai 時）
+        input_schema:
+          $ref: "#/components/schemas/JsonSchema"
+          description: Anthropic `input_schema`（api_type 為 anthropic 時）
+        strict:
+          type: boolean
+          nullable: true
+          description: OpenAI 嚴格模式（僅 openai）
+      additionalProperties: true
+
+    JsonSchema:
+      description: JSON Schema 子集（工具參數結構）
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [object, array, string, number, integer, boolean, "null"]
+        description:
+          type: string
+        properties:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/JsonSchema"
+        items:
+          oneOf:
+            - $ref: "#/components/schemas/JsonSchema"
+            - type: array
+              items:
+                $ref: "#/components/schemas/JsonSchema"
+        required:
+          type: array
+          items:
+            type: string
+        enum:
+          type: array
+          items: {}
+        additionalProperties:
+          type: boolean
+      additionalProperties: true
+      example:
+        type: object
+        properties:
+          city:
+            type: string
+        required: [city]
